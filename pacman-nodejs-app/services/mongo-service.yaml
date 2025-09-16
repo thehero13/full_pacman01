@@ -4,6 +4,7 @@ metadata:
   labels:
     name: mongo
   name: mongo
+  namespace: mongo
 spec:
   type: LoadBalancer
   ports:
