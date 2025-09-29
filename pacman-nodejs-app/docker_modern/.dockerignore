@@ -1,2 +1,4 @@
 node_modules
 npm-debug.log
+pacman/package.json
+pacman/package-lock.json

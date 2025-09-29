@@ -1,0 +1,20 @@
+FROM node:20-alpine
+
+WORKDIR /usr/src/app
+
+# 1) Use the working dependency manifest/lock
+#    (These two files come from pacman2/)
+COPY pacman2/package.json ./package.json
+COPY pacman2/package-lock.json ./package-lock.json
+
+# 2) Install EXACT versions
+RUN npm ci --omit=dev
+
+# 3) Copy the app code you want to run (from pacman/)
+#    IMPORTANT: do NOT overwrite package*.json we just used.
+#    Easiest: exclude them via .dockerignore (shown below).
+COPY pacman/ ./
+
+EXPOSE 8080
+CMD ["npm", "start"]
+

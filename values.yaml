@@ -1,0 +1,24 @@
+agent:
+  discovery:
+    enabled: true
+clusterName: AYPAC_Cluster
+environment: AYPAC_ENV
+gateway:
+  enabled: false
+operator:
+  enabled: true
+operatorcrds:
+  install: true
+
+splunkObservability:
+  accessToken: Fkp-hKzmQnqn-9VgiU1G7w
+  realm: us1
+
+splunkPlatform:
+  token: 65b7c776-1544-4547-bcb4-33d9e24953ae
+  endpoint: https://69.220.159.17:8088/services/collector
+  index: ay_index
+  insecureSkipVerify: true
+
+logsEngine: otel
+

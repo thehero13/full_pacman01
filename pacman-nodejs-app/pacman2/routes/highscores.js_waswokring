@@ -1,0 +1,149 @@
+var express = require('express');
+var router = express.Router();
+var bodyParser = require('body-parser');
+var Database = require('../lib/database');
+const opentelemetry = require('@opentelemetry/api'); // OpenTelemetry namespace import
+
+// ---- Metrics instruments (Counter + Histogram) ----
+// Requires a MeterProvider to be initialized at app start (e.g., via Splunk OTel or your own metrics.js)
+const meter = opentelemetry.metrics.getMeter('pacman', '1.0.0');
+
+const hsCount = meter.createCounter('pacman.highscore.count', {
+  unit: '{submission}',
+  description: 'One count per highscore submission',
+});
+
+const hsValue = meter.createHistogram('pacman.highscore.value', {
+  unit: '{points}',
+  description: 'Distribution of submitted highscore values',
+});
+
+// Helper: build metric attributes from the request (kept low-cardinality)
+function hsAttrs(req, userLevel) {
+  return {
+    name: String(req.body.name || ''),
+    cloud: String(req.body.cloud || ''),
+    zone: String(req.body.zone || ''),
+    host: String(req.body.host || req.hostname || ''),
+    level: Number(isNaN(userLevel) ? 0 : userLevel),
+    // If you really need these, uncomment—be mindful of cardinality:
+    // referer: String(req.headers.referer || ''),
+    // user_agent: String(req.headers['user-agent'] || ''),
+    // hostname: String(req.hostname || ''),
+    // ip_addr: String(req.ip || ''),
+  };
+}
+
+// create application/x-www-form-urlencoded parser
+var urlencodedParser = bodyParser.urlencoded({ extended: false })
+
+// middleware that is specific to this router
+router.use(function timeLog (req, res, next) {
+    console.log('Time: ', Date());
+    next();
+})
+
+router.get('/list', urlencodedParser, function(req, res, next) {
+    console.log('[GET /highscores/list]');
+    Database.getDb(req.app, function(err, db) {
+        if (err) {
+            return next(err);
+        }
+
+        // Retrieve the top 10 high scores
+        var col = db.collection('highscore');
+        col.find({}).sort([['score', -1]]).limit(10).toArray(function(err, docs) {
+            var result = [];
+            if (err) {
+                console.log(err);
+            }
+
+            docs.forEach(function(item, index, array) {
+                result.push({ name: item['name'], cloud: item['cloud'],
+                              zone: item['zone'], host: item['host'],
+                              score: item['score'] });
+            });
+
+            res.json(result);
+        });
+    });
+});
+
+// Accessed at /highscores
+router.post('/', urlencodedParser, function(req, res, next) {
+    console.log('[POST /highscores] body =', req.body,
+                ' host =', req.headers.host,
+                ' user-agent =', req.headers['user-agent'],
+                ' referer =', req.headers.referer);
+
+    var userScore = parseInt(req.body.score, 10),
+        userLevel = parseInt(req.body.level, 10);
+
+    const span = opentelemetry.trace.getActiveSpan();
+    if (span) {
+      span.setAttribute('player.name', req.body.name || '');
+      span.setAttribute('player.highscore', isNaN(userScore) ? 0 : userScore);
+    }
+
+  // Emit metrics for this submission (requires metrics pipeline initialized at app start)
+  const attrs = hsAttrs(req, userLevel);
+  hsCount.add(1, attrs); // occurrence = 1
+  if (!isNaN(userScore)) {
+    hsValue.record(userScore, attrs); // actual score value
+  }
+
+// optional debug log to stdout
+if (process.env.METRICS_DEBUG === '1') {
+  console.log(
+    '[metrics] pacman.highscore.count=1, pacman.highscore.value=%s for name=%s zone=%s host=%s',
+    userScore,
+    req.body.name,
+    req.body.zone,
+    req.body.host || req.hostname
+  );
+}
+    Database.getDb(req.app, function(err, db) {
+        if (err) {
+            return next(err);
+        }
+
+        // Insert high score with extra user data
+        db.collection('highscore').insertOne({
+                name: req.body.name,
+                cloud: req.body.cloud,
+                zone: req.body.zone,
+                host: req.body.host,
+                score: userScore,
+                level: userLevel,
+                date: Date(),
+                referer: req.headers.referer,
+                user_agent: req.headers['user-agent'],
+                hostname: req.hostname,
+                ip_addr: req.ip
+            }, {
+                w: 'majority',
+                j: true,
+                wtimeout: 10000
+            }, function(err, result) {
+                var returnStatus = '';
+
+                if (err) {
+                    console.log(err);
+                    returnStatus = 'error';
+                } else {
+                    console.log('Successfully inserted highscore');
+                    returnStatus = 'success';
+                }
+
+                res.json({
+                    name: req.body.name,
+                    zone: req.body.zone,
+                    score: userScore,
+                    level: userLevel,
+                    rs: returnStatus
+                });
+            });
+    });
+});
+
+module.exports = router;

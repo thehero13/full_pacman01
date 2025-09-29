@@ -16,7 +16,7 @@ spec:
         name: pacman
     spec:
       containers:
-      - image: docker.io/theonlyhero/pacman-modernrum:latest
+      - image: docker.io/theonlyhero/pacman-modern4:latest
         name: pacman
         ports:
         - containerPort: 8080
