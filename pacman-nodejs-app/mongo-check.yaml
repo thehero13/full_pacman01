@@ -1,0 +1,81 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: mongo-heartbeat-checker
+  labels:
+    app: mongo-heartbeat-checker
+spec:
+  restartPolicy: Always
+  containers:
+    - name: hb
+      image: alpine:3.20
+      command: ["/bin/sh","-c"]
+      args:
+        - |
+          set -eu
+          echo "[hb] starting..."
+          apk add --no-cache curl >/dev/null
+          : "${MONGO_HOST:=mongo.mongo.svc.cluster.local}"
+          : "${MONGO_PORT:=27017}"
+          : "${INTERVAL:=10}"
+          : "${SERVICE:=mongo-heartbeat}"
+          : "${CLUSTER_NAME:=AYPAC_Cluster}"
+          : "${ENVIRONMENT:=AYPAC_ENV}"
+
+          REALM="$(cat /var/run/secrets/splunk/realm)"
+          TOKEN="$(cat /var/run/secrets/splunk/token)"
+
+          while true; do
+            if nc -z -w2 "$MONGO_HOST" "$MONGO_PORT"; then VAL=1; else VAL=0; fi
+
+            curl -sS --request POST "https://ingest.${REALM}.signalfx.com/v2/datapoint" \
+              -H "Content-Type: application/json" \
+              -H "X-SF-TOKEN: ${TOKEN}" \
+              --data "{
+                \"gauge\": [
+                  {
+                    \"metric\": \"mongo.health.check\",
+                    \"value\": ${VAL},
+                    \"dimensions\": {
+                      \"service\": \"${SERVICE}\",
+                      \"target\": \"mongodb\",
+                      \"host\": \"${MONGO_HOST}\",
+                      \"clusterName\": \"${CLUSTER_NAME}\",
+                      \"environment\": \"${ENVIRONMENT}\"
+                    }
+                  }
+                ]
+              }" || echo "[hb] post failed"
+
+            echo "[hb] mongo.health.check=${VAL} clusterName=${CLUSTER_NAME} environment=${ENVIRONMENT}"
+            sleep "${INTERVAL}"
+          done
+      env:
+        - name: MONGO_HOST
+          value: "mongo.mongo.svc.cluster.local"
+        - name: MONGO_PORT
+          value: "27017"
+        - name: INTERVAL
+          value: "10"
+        - name: SERVICE
+          value: "mongo-heartbeat"
+        - name: CLUSTER_NAME
+          value: "AYPAC_Cluster"
+        - name: ENVIRONMENT
+          value: "AYPAC_ENV"
+      volumeMounts:
+        - name: splunk-o11y
+          mountPath: /var/run/secrets/splunk
+          readOnly: true
+  volumes:
+    - name: splunk-o11y
+      projected:
+        sources:
+          - secret:
+              name: splunk-o11y
+              items:
+                - key: realm
+                  path: realm
+                - key: token
+                  path: token
+

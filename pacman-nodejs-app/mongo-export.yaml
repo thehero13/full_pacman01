@@ -1,0 +1,137 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pacman-mongo-exporter-config
+data:
+  exporter.js: |
+    const express = require('express');
+    const { MongoClient } = require('mongodb');
+    const promClient = require('prom-client');
+
+    const PORT = process.env.EXPORTER_PORT || 3000;
+    const MONGO_URI = process.env.MONGO_URI || "mongodb://mongo.mongo.svc.cluster.local:27017";
+    const DB_NAME = process.env.DB_NAME || 'pacman';
+    const COLLECTION = process.env.COLLECTION_NAME || 'highscore';
+
+    const register = new promClient.Registry();
+    promClient.collectDefaultMetrics({ register });
+
+    const maxScore = new promClient.Gauge({ name: 'pacman_highscore_max', help: 'Highest score ever recorded' });
+    const minScore = new promClient.Gauge({ name: 'pacman_highscore_min', help: 'Lowest score ever recorded' });
+    const latestScore = new promClient.Gauge({ name: 'pacman_highscore_latest', help: 'Most recent score submitted' });
+    const totalScores = new promClient.Gauge({ name: 'pacman_highscore_total', help: 'Total number of highscore records (total play count)' });
+    const topScore = new promClient.Gauge({ name: 'pacman_highscore_rank', help: 'Top 10 leaderboard (rank only)', labelNames: ['rank'] });
+    const topScoreWithNames = new promClient.Gauge({ name: 'pacman_highscore_rank_with_name', help: 'Top 10 leaderboard with names', labelNames: ['rank','name'] });
+
+    register.registerMetric(maxScore);
+    register.registerMetric(minScore);
+    register.registerMetric(latestScore);
+    register.registerMetric(totalScores);
+    register.registerMetric(topScore);
+    register.registerMetric(topScoreWithNames);
+
+    const app = express();
+    const client = new MongoClient(MONGO_URI);
+
+    app.get('/metrics', async (req, res) => {
+      try {
+        await client.connect();
+        const db = client.db(DB_NAME);
+        const col = db.collection(COLLECTION);
+
+        // Max score
+        const max = await col.find().sort({ score: -1 }).limit(1).toArray();
+        if (max.length > 0) maxScore.set(max[0].score);
+
+        // Min score
+        const min = await col.find().sort({ score: 1 }).limit(1).toArray();
+        if (min.length > 0) minScore.set(min[0].score);
+
+        // Latest score
+        const latest = await col.find().sort({ date: -1 }).limit(1).toArray();
+        if (latest.length > 0) latestScore.set(latest[0].score);
+
+        // Total count
+        const count = await col.countDocuments();
+        totalScores.set(count);
+
+        // Top 10 leaderboard
+        const top = await col.find().sort({ score: -1 }).limit(10).toArray();
+        top.forEach((doc, i) => {
+          const rank = (i + 1).toString();
+          topScore.set({ rank }, doc.score);
+          topScoreWithNames.set({ rank, name: doc.name || 'unknown' }, doc.score);
+        });
+
+        res.set('Content-Type', register.contentType);
+        res.end(await register.metrics());
+      } catch (err) {
+        console.error('Error collecting metrics:', err);
+        res.status(500).send('Error collecting metrics');
+      }
+    });
+
+    app.listen(PORT, () => {
+      console.log(`MongoDB exporter listening on :${PORT}/metrics`);
+    });
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pacman-mongo-exporter
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pacman-mongo-exporter
+  template:
+    metadata:
+      labels:
+        app: pacman-mongo-exporter
+    spec:
+      volumes:
+        - name: exporter-code
+          emptyDir: {}
+        - name: exporter-config
+          configMap:
+            name: pacman-mongo-exporter-config
+      initContainers:
+        - name: npm-install
+          image: node:20-slim
+          workingDir: /app
+          command: ["sh", "-c", "cp /config/exporter.js . && npm init -y && npm install express mongodb prom-client"]
+          volumeMounts:
+            - name: exporter-code
+              mountPath: /app
+            - name: exporter-config
+              mountPath: /config
+      containers:
+        - name: exporter
+          image: node:20-slim
+          workingDir: /app
+          command: ["node", "exporter.js"]
+          ports:
+            - containerPort: 3000
+          env:
+            - name: MONGO_URI
+              value: "mongodb://mongo.mongo.svc.cluster.local:27017"
+            - name: DB_NAME
+              value: "pacman"
+            - name: COLLECTION_NAME
+              value: "highscore"
+          volumeMounts:
+            - name: exporter-code
+              mountPath: /app
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pacman-mongo-exporter
+spec:
+  selector:
+    app: pacman-mongo-exporter
+  ports:
+    - port: 3000
+      targetPort: 3000
+

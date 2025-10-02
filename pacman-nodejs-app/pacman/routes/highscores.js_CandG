@@ -2,6 +2,44 @@ var express = require('express');
 var router = express.Router();
 var bodyParser = require('body-parser');
 var Database = require('../lib/database');
+const opentelemetry = require('@opentelemetry/api'); // OpenTelemetry API
+
+// ---- Metrics ----
+const meter = opentelemetry.metrics.getMeter('pacman', '1.0.0');
+
+// Counter: cumulative submissions
+const hsScore = meter.createCounter('pacman.highscore.score', {
+  unit: '{points}',
+  description: 'High score submissions (adds raw score value per submission)',
+});
+
+// Gauge: latest score observed
+const hsStats = meter.createObservableGauge('pacman.highscore.stats', {
+  unit: '{points}',
+  description: 'Latest high score value per submission',
+});
+
+// State for Gauge reporting
+let lastUserScore = 0;
+let lastAttrs = {};
+
+// Register callback for the Gauge
+hsStats.addCallback((observableResult) => {
+  if (lastUserScore) {
+    observableResult.observe(lastUserScore, lastAttrs);
+  }
+});
+
+// Helper: build metric attributes from the request (keep cardinality reasonable)
+function hsAttrs(req, userLevel) {
+  return {
+    name: String(req.body.name || ''), // ⚠️ careful, username = high-cardinality
+    cloud: String(req.body.cloud || ''),
+    zone: String(req.body.zone || ''),
+    host: String(req.body.host || req.hostname || ''),
+    level: Number(isNaN(userLevel) ? 0 : userLevel),
+  };
+}
 
 // create application/x-www-form-urlencoded parser
 var urlencodedParser = bodyParser.urlencoded({ extended: false });
@@ -12,6 +50,7 @@ router.use(function timeLog(req, res, next) {
   next();
 });
 
+// GET: top 10 highscores
 router.get('/list', urlencodedParser, function (req, res, next) {
   console.log('[GET /highscores/list]');
   Database.getDb(req.app, function (err, db) {
@@ -42,7 +81,7 @@ router.get('/list', urlencodedParser, function (req, res, next) {
   });
 });
 
-// Accessed at /highscores
+// POST: submit a highscore
 router.post('/', urlencodedParser, function (req, res, next) {
   console.log(
     '[POST /highscores] body =',
@@ -58,19 +97,43 @@ router.post('/', urlencodedParser, function (req, res, next) {
   var userScore = parseInt(req.body.score, 10),
     userLevel = parseInt(req.body.level, 10);
 
-  // Add custom span attributes (auto-instrumentation creates the span)
+  // --- Span attributes (business metadata) ---
   const span = opentelemetry.trace.getActiveSpan();
   if (span) {
     span.setAttribute('player.name', req.body.name || '');
     span.setAttribute('player.highscore', isNaN(userScore) ? 0 : userScore);
   }
 
+  // --- Metrics ---
+  if (!isNaN(userScore)) {
+    const attrs = hsAttrs(req, userLevel);
+
+    // Counter: add cumulative
+    hsScore.add(userScore, attrs);
+
+    // Gauge: update state
+    lastUserScore = userScore;
+    lastAttrs = attrs;
+
+    if (process.env.METRICS_DEBUG === '1') {
+      console.log(
+        '[metrics] counter pacman.highscore.score+=%s gauge pacman.highscore.stats=%s name=%s zone=%s host=%s level=%s',
+        userScore,
+        lastUserScore,
+        attrs.name,
+        attrs.zone,
+        attrs.host,
+        attrs.level
+      );
+    }
+  }
+
+  // --- Database insert ---
   Database.getDb(req.app, function (err, db) {
     if (err) {
       return next(err);
     }
 
-    // Insert high score with extra user data
     db.collection('highscore').insertOne(
       {
         name: req.body.name,
